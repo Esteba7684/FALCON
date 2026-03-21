@@ -97,7 +97,9 @@ class LinearSelfAttention(_BaseLinearSelfAttention):
             linear_attention_triton_dtype=self.linear_attention_triton_dtype,
         )
 
-        eta = beta_prime.to(dtype=torch.float32) * torch.exp(log_gamma.to(dtype=torch.float32))
+        eta = (beta_prime.to(dtype=torch.float32) * torch.exp(log_gamma.to(dtype=torch.float32))).clamp(
+            max=2.0 - self.fast_weight_eta_eps
+        )
 
         q_run = q
         k_run = k * eta.unsqueeze(-1)
@@ -127,8 +129,8 @@ class LinearSelfAttention(_BaseLinearSelfAttention):
 
     def forward(self, x: torch.Tensor, *, cu_seqlens: torch.LongTensor | None = None) -> torch.Tensor:
         """Run Triton LASD core when available; otherwise use chunk fallback."""
-        if not self.use_triton_lasd and cu_seqlens is None:
-            return cast(torch.Tensor, super().forward(x))
+        if not self.use_triton_lasd:
+            return cast(torch.Tensor, super().forward(x, cu_seqlens=cu_seqlens))
 
         original = cast(Any, getattr(_BASE_MODULE, "run_chunk_local_renorm_with_runner"))
 
@@ -156,7 +158,7 @@ class LinearSelfAttention(_BaseLinearSelfAttention):
 
         setattr(_BASE_MODULE, "run_chunk_local_renorm_with_runner", _patched_run_chunk_local_renorm_with_runner)
         try:
-            return cast(torch.Tensor, super().forward(x))
+            return cast(torch.Tensor, super().forward(x, cu_seqlens=cu_seqlens))
         finally:
             setattr(_BASE_MODULE, "run_chunk_local_renorm_with_runner", original)
 
@@ -198,13 +200,13 @@ class GPTConfig(PretrainedConfig):
     v_rmsnorm_learnable: bool = False
 
     # Fast weight / decay knobs
-    fast_weight_beta: float = 0.999  # initialization for beta logits (post-sigmoid)
+    fast_weight_beta: float = 0.5  # initialization for beta logits (post-sigmoid)
     beta_scale_by_2: bool = True
     fast_weight_lambda_min: float = 0.01
     fast_weight_lambda_max: float = 0.01  # initialization range for lambda logits (post-sigmoid, pre-scale)
     fast_weight_logit_eps: float = 1e-5
     lambda_scale: float = 0.95
-    fast_weight_eta_eps: float = 1e-5
+    fast_weight_eta_eps: float = 1e-3
     fast_weight_decay_floor: float = 0.01
     linear_attention_chunk_size: int = 128
     attention_norm_eps: float = 1e-5
